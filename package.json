@@ -1,0 +1,48 @@
+{
+  "name": "dsh-plugin-opencode-go",
+  "version": "0.1.0",
+  "description": "Host-side OpenCode Go adapter for DeepSeek Harness: session-partitioned request headers on every Go request, plus a Go-native web_search provider whose model is one config line to switch",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "plugin",
+    "opencode",
+    "opencode-go",
+    "session",
+    "web-search"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LogicShao/dsh-plugin-opencode-go.git"
+  },
+  "homepage": "https://github.com/LogicShao/dsh-plugin-opencode-go#readme",
+  "bugs": {
+    "url": "https://github.com/LogicShao/dsh-plugin-opencode-go/issues"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node test/mechanism.test.mjs"
+  }
+}

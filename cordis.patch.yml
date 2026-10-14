@@ -1,0 +1,39 @@
+# dsh-plugin-opencode-go bundle layer.
+#
+# 两行：
+#   1) 把 web seam 的搜索提供方切到本插件直连 Go 网关的实现；
+#   2) 挂载本插件（会话头 + 搜索提供方）。
+#
+# 模型切换点：下面 config.search.model——写模型 id，或写 'auto' 跟随当前聊天模型。
+# 本文件的 config 可被 profile 层按 id 覆盖（见 README「配置」）。
+- id: web
+  name: '@deepseek-ai/dsh-web'
+  config:
+    searchProvider: opencode-go
+- insert:
+    - id: opencode-go-adapter
+      name: 'dsh-plugin-opencode-go'
+      config:
+        # 发往这些主机的请求都要带会话头（聊天 + web_search 等辅助请求）。
+        hosts:
+          - opencode.ai
+        # 默认会话头；{sessionId}/{provider}/{model} 为占位符。
+        headers:
+          x-opencode-session: '{sessionId}'
+          x-deepseek-harness-session-id: '{sessionId}'
+        # 可选：按 llm/stream 的路由 id 覆盖上面的头模板。
+        routes:
+          opencode-go:
+            x-opencode-session: '{sessionId}'
+            x-deepseek-harness-session-id: '{sessionId}'
+        # 哪个路由 id 算「聊天模型」——search.model: 'auto' 跟随它。
+        chatProviders:
+          - opencode-go
+        search:
+          enabled: true
+          provider: opencode-go
+          baseURL: https://opencode.ai/zen/go/v1
+          apiKeyEnv: OPENCODE_GO_API_KEY
+          model: deepseek-v4.1-flash
+          maxTokens: 4096
+          maxUses: 5
