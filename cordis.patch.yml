@@ -1,8 +1,14 @@
 # dsh-plugin-opencode-go bundle layer.
 #
 # 两行：
-#   1) 把 web seam 的搜索提供方切到本插件直连 Go 网关的实现；
-#   2) 挂载本插件（会话头 + 搜索提供方）。
+#   1) 把 web seam 的搜索 / 抓取提供方指向本插件（`opencode-go` / `opencode-go-fetch`）；
+#   2) 挂载本插件（会话头 + 搜索提供方 + 抓取提供方）。
+#
+# 「关掉插件就回到原始 DSH 配置」靠的是这两行同属一个 bundle 层：
+# 在插件管理页关掉整个插件时，两行一起消失，`web` 回到 base 的
+# `deepseek-official` + `http`。注意：**不要**只关插件行而保留本层，也不要手工在
+# profile 里抄 `- id: web`，否则会留下一个指向 opencode-go / opencode-go-fetch 的
+# 悬空引用，搜索与抓取会报 WEB_PROVIDER_CONFIGURED_MISSING。
 #
 # 模型切换点：下面 config.search.model——写模型 id，或写 'auto' 跟随当前聊天模型。
 # 本文件的 config 可被 profile 层按 id 覆盖（见 README「配置」）。
@@ -10,6 +16,11 @@
   name: '@deepseek-ai/dsh-web'
   config:
     searchProvider: opencode-go
+    # 抓取也交给本插件：内置的 http 提供方在连接前要求域名解析到公网 unicast，
+    # 代理 fake-ip（198.18.0.0/15、fc00::/7）下会直接报
+    # “resolves to a non-public IP address”。本插件的提供方不做该解析校验，
+    # 但仍拒绝非公网 IP 字面量（fetch.allowIpLiterals 可放开）。
+    fetchProvider: opencode-go-fetch
 - insert:
     - id: opencode-go-adapter
       name: 'dsh-plugin-opencode-go'
@@ -30,10 +41,23 @@
         chatProviders:
           - opencode-go
         search:
-          enabled: true
           provider: opencode-go
           baseURL: https://opencode.ai/zen/go/v1
           apiKeyEnv: OPENCODE_GO_API_KEY
-          model: deepseek-v4.1-flash
+          # 默认：单价低（≈$0.002/次）、自带 citation 摘要、实测真的会检索。
+          model: claude-haiku-5-5
+          # 开关 1：Go 内部换模型重试（false = 只试 model，失败即报错）。
+          modelFallback: true
+          # 主模型没返回检索结果时按顺序重试：先免费档，最后贵但稳的。
+          fallbackModels:
+            - minimax-m3.1-flash-free
+            - deepseek-v4-pro
+          # 开关 2：Go 全失败后改用官方 DeepSeek 兜底（按官方 API 计费，默认关）。
+          officialFallback: false
+          officialBaseURL: https://api.deepseek.com/anthropic/v1
+          officialApiKeyEnv: DEEPSEEK_API_KEY
+          officialModel: deepseek-v4-flash
+          # 记住「哪个模型不检索」的时长（分钟）；0 = 每次都按原顺序试。
+          noSearchCacheMinutes: 30
           maxTokens: 4096
           maxUses: 5
