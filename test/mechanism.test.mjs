@@ -8,6 +8,7 @@
 // 运行：node test/mechanism.test.mjs
 
 process.env.OPENCODE_GO_API_KEY = 'oc_sk_test_key'
+process.env.OPENCODE_GO_API_KEY_2 = 'oc_sk_test_key_2'
 process.env.DSH_SESSION_ID = 'session-from-env'
 
 import { readFileSync } from 'node:fs'
@@ -620,7 +621,149 @@ apply(ctx, {})
 assertEq(ctx.providers[0].available(), true, '读不到选择时不乱猜，保持可用')
 ctx.dispose()
 
-// --- 27. Config（插件页表单）与 volatile 访问器 -----------------------------
+// --- 27. 多 key：优先级、会话粘滞、失败轮换 ---------------------------------
+const CHAT_URL = 'https://opencode.ai/zen/go/v1/chat/completions'
+const KEY_CONFIG = {
+  keys: [
+    { ref: 'OPENCODE_GO_API_KEY', priority: 10 },
+    { ref: 'OPENCODE_GO_API_KEY_2', priority: 5 },
+  ],
+}
+
+// 未配置 keys 时保持旧的单 key 行为：不碰 Authorization。
+installFetchStub()
+calls.length = 0
+reply = () => ({ ok: true })
+replyStatus = 200
+ctx = makeCtx()
+apply(ctx, {})
+await runWaterfall(ctx, { provider: 'opencode-go', sessionId: 'session-legacy', model: 'm' }, CHAT_URL)
+assertEq(lastHeaders().get('authorization'), null, '未配置 keys 时不改 Authorization')
+ctx.dispose()
+
+// 不在 Go API 路径下的 opencode.ai 请求不注入 key。
+installFetchStub()
+calls.length = 0
+reply = () => ({ ok: true })
+replyStatus = 200
+ctx = makeCtx()
+apply(ctx, KEY_CONFIG)
+await fetch('https://opencode.ai/docs/go')
+assertEq(lastHeaders().get('authorization'), null, '非 Go API 路径不注入 key')
+ctx.dispose()
+
+// 会话粘滞：同一 session 连续两次都用最高优先级 key。
+installFetchStub()
+calls.length = 0
+reply = () => ({ ok: true })
+replyStatus = 200
+ctx = makeCtx()
+apply(ctx, KEY_CONFIG)
+await runWaterfall(ctx, { provider: 'opencode-go', sessionId: 'session-sticky', model: 'm' }, CHAT_URL)
+assertEq(lastHeaders().get('authorization'), 'Bearer oc_sk_test_key', '多 key：优先用最高优先级')
+await runWaterfall(ctx, { provider: 'opencode-go', sessionId: 'session-sticky', model: 'm' }, CHAT_URL)
+assertEq(lastHeaders().get('authorization'), 'Bearer oc_sk_test_key', '同一对话沿用同一个 key')
+ctx.dispose()
+
+// 连续两次 5xx 后才换到下一个 key。
+installFetchStub()
+calls.length = 0
+reply = () => ({ ok: true })
+replyStatus = 500
+ctx = makeCtx()
+apply(ctx, KEY_CONFIG)
+await runWaterfall(ctx, { provider: 'opencode-go', sessionId: 'session-failover', model: 'm' }, CHAT_URL)
+assertEq(lastHeaders().get('authorization'), 'Bearer oc_sk_test_key', '第一次失败仍用原 key')
+await runWaterfall(ctx, { provider: 'opencode-go', sessionId: 'session-failover', model: 'm' }, CHAT_URL)
+replyStatus = 200
+await runWaterfall(ctx, { provider: 'opencode-go', sessionId: 'session-failover', model: 'm' }, CHAT_URL)
+assertEq(lastHeaders().get('authorization'), 'Bearer oc_sk_test_key_2', '连续失败达到阈值后换 key')
+assertTrue(ctx.logs.warn.some((line) => line.includes('连续失败')), '换 key 时打日志')
+ctx.dispose()
+
+// 401 立即换。
+installFetchStub()
+calls.length = 0
+reply = () => ({ ok: true })
+replyStatus = 401
+ctx = makeCtx()
+apply(ctx, KEY_CONFIG)
+await runWaterfall(ctx, { provider: 'opencode-go', sessionId: 'session-auth', model: 'm' }, CHAT_URL)
+replyStatus = 200
+await runWaterfall(ctx, { provider: 'opencode-go', sessionId: 'session-auth', model: 'm' }, CHAT_URL)
+assertEq(lastHeaders().get('authorization'), 'Bearer oc_sk_test_key_2', '401 立即换 key')
+ctx.dispose()
+
+// 搜索请求也走同一个 key 池。
+installFetchStub()
+calls.length = 0
+reply = OK_REPLY
+replyStatus = 200
+ctx = makeCtx()
+apply(ctx, KEY_CONFIG)
+await ctx.providers[0].search({ query: 'q' })
+assertEq(lastHeaders().get('x-api-key'), 'oc_sk_test_key', '搜索用多 key 池里的 key')
+assertEq(lastHeaders().get('authorization'), 'Bearer oc_sk_test_key', '搜索的 Authorization 同样覆盖')
+ctx.dispose()
+
+// 搜索遇到 401 时换 key 再试下一个模型。
+installFetchStub()
+calls.length = 0
+let search401Count = 0
+reply = () =>
+  search401Count++ === 0
+    ? { status: 401, json: { error: { message: 'invalid key' } } }
+    : OK_REPLY()
+replyStatus = 200
+ctx = makeCtx()
+apply(ctx, KEY_CONFIG)
+const retriedSearch = await ctx.providers[0].search({ query: 'q' })
+assertEq(retriedSearch.sources.length, 2, '搜索 401 后换 key 仍能出结果')
+assertEq(lastHeaders().get('x-api-key'), 'oc_sk_test_key_2', '搜索 401 后下一次尝试用新 key')
+ctx.dispose()
+
+// patchFetch: false 时由搜索提供方自己记录失败，仍能轮换。
+installFetchStub()
+calls.length = 0
+reply = () => ({ ok: true })
+replyStatus = 500
+ctx = makeCtx()
+apply(ctx, { ...KEY_CONFIG, patchFetch: false, search: { model: 'm-1', fallbackModels: ['m-2', 'm-3'] } })
+await assertThrows(() => ctx.providers[0].search({ query: 'q' }), [], '多 key 且关闭 fetch 包装时搜索失败可控')
+assertEq(searchCalls().map((call) => new Headers(call.init.headers).get('x-api-key')).join(','), 'oc_sk_test_key,oc_sk_test_key,oc_sk_test_key_2', '关闭 fetch 包装后搜索仍能按失败次数轮换 key')
+ctx.dispose()
+
+// 凭据服务里的引用也能作为多 key 来源。
+installFetchStub()
+calls.length = 0
+reply = () => ({ ok: true })
+replyStatus = 200
+ctx = makeCtx()
+ctx.get = (service) =>
+  service === 'credentials'
+    ? {
+        resolve: async (ref) => ({ value: ref === 'cred-a' ? 'key-a' : ref === 'cred-b' ? 'key-b' : undefined }),
+      }
+    : undefined
+apply(ctx, {
+  keys: [
+    { ref: 'cred-a', priority: 10 },
+    { ref: 'cred-b', priority: 5 },
+  ],
+})
+await runWaterfall(ctx, { provider: 'opencode-go', sessionId: 'session-cred', model: 'm' }, CHAT_URL)
+assertEq(lastHeaders().get('authorization'), 'Bearer key-a', '从 credentials 服务解析多 key')
+ctx.dispose()
+
+// 配置归一化。
+assertEq(
+  normalizeConfig({ keys: ['a', { ref: 'b', priority: 2 }] }).keys.map((entry) => entry.ref).join(','),
+  'b,a',
+  'normalizeConfig 归一化 keys',
+)
+assertEq(normalizeConfig({}).keyFailoverAfter, 2, '默认失败阈值是 2')
+
+// --- 28. Config（插件页表单）与 volatile 访问器 -----------------------------
 assertEq(Config === undefined || typeof Config === 'object', true, 'Config 要么是 schema，要么缺失但不影响加载')
 const accessor = (value) => ({ get: () => value })
 const fromForm = normalizeConfig({

@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-opencode-go",
-  "version": "0.2.0",
-  "description": "Host-side OpenCode Go adapter for DeepSeek Harness: session-partitioned request headers on every Go request, a Go-native web_search provider with a verified model and automatic fallback, and a web_fetch provider that works behind fake-ip / transparent proxies",
+  "version": "0.3.0",
+  "description": "Host-side OpenCode Go adapter for DeepSeek Harness: session-partitioned request headers on every Go request, priority-based multi-key selection with session affinity and failover, a Go-native web_search provider with automatic model fallback, and a web_fetch provider that works behind fake-ip / transparent proxies",
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -47,7 +47,8 @@
     }
   },
   "scripts": {
-    "test": "node test/mechanism.test.mjs && node test/fetch.test.mjs",
+    "test": "node test/mechanism.test.mjs && node test/fetch.test.mjs && node test/keys.test.mjs",
     "compat": "node tools/compat-check.mjs"
   }
 }
+

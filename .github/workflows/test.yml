@@ -18,5 +18,7 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Mechanism tests
         run: node test/mechanism.test.mjs
+      - name: Multi-key tests
+        run: node test/keys.test.mjs
       - name: Fetch provider tests
         run: node test/fetch.test.mjs

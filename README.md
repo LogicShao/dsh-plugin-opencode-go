@@ -55,6 +55,31 @@ API key 二选一：DSH 设置 → 模型 → `opencode-go`，或环境变量 `O
 
 没有插件页表单，配置只走 YAML。关掉整个插件会恢复 DSH 默认搜索/抓取。
 
+### 多 key
+
+`keys` 按 `priority` 从高到低用；同一会话固定一个 key，失败才换；同优先级随机。
+
+```yaml
+- id: opencode-go-adapter
+  name: 'dsh-plugin-opencode-go'
+  config:
+    keys:
+      - ref: OPENCODE_GO_API_KEY
+        priority: 10
+      - ref: OPENCODE_GO_API_KEY_2
+        priority: 5
+      - ref: OPENCODE_GO_API_KEY_3
+        priority: 5
+    keyFailoverAfter: 2
+```
+
+- `ref` 是 `~/.dsh/.credentials.yaml` 的引用名或启动环境变量名；
+- 401/402/403 立即换 key；408/429/5xx/网络错误连续 `keyFailoverAfter` 次后换；
+- 同一对话的聊天和搜索共用一个 key；
+- `llm-pi-ai` 的 `apiKeyEnv` 仍需指向一个存在的 key，实际请求的 key 由 `keys` 池覆盖。
+
+不配置 `keys` 时保持原来的单 key 行为。
+
 ## 验证
 
 聊天不再报 `400 Request is missing x-opencode-session`，`web_search` 能返回结果。升级 DSH 后跑：

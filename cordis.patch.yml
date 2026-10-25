@@ -40,6 +40,15 @@
         # 哪个路由 id 算「聊天模型」——search.model: 'auto' 跟随它。
         chatProviders:
           - opencode-go
+        # 多 key（可选）：ref 是 ~/.dsh/.credentials.yaml 的引用名或启动环境变量名，
+        # priority 越大越先用；同一会话固定一个 key，401/402/403 立即换，
+        # 429/5xx/网络错误连续 keyFailoverAfter 次后换；同优先级随机。
+        # keys:
+        #   - ref: OPENCODE_GO_API_KEY
+        #     priority: 10
+        #   - ref: OPENCODE_GO_API_KEY_2
+        #     priority: 5
+        # keyFailoverAfter: 2
         search:
           provider: opencode-go
           baseURL: https://opencode.ai/zen/go/v1
