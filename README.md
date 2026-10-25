@@ -96,6 +96,7 @@ node tools/compat-check.mjs
 
 ```bash
 node test/mechanism.test.mjs
+node test/keys.test.mjs
 node test/fetch.test.mjs
 ```
 
