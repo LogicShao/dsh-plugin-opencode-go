@@ -16,6 +16,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      - name: Retry policy tests
+        run: node test/retry.test.mjs
       - name: Mechanism tests
         run: node test/mechanism.test.mjs
       - name: Multi-key tests

@@ -510,7 +510,12 @@ const bundlePatch = readFileSync(new URL('../cordis.patch.yml', import.meta.url)
 assertTrue(/^- id: web$/mu.test(bundlePatch), 'bundle 层里保留 web 的 searchProvider 指向')
 assertTrue(bundlePatch.includes('searchProvider: opencode-go'), '指向本插件的提供方 id')
 assertTrue(bundlePatch.includes('fetchProvider: opencode-go-fetch'), '抓取指向本插件的提供方（fake-ip / 透明代理环境）')
-assertEq(bundlePatch.includes('enabled:'), false, '不再有会留下悬空指向的 enabled 开关')
+// 注释里的示例配置不算开关；只检查生效行。
+const activeBundlePatch = bundlePatch
+  .split('\n')
+  .filter((line) => !/^\s*#/u.test(line))
+  .join('\n')
+assertEq(activeBundlePatch.includes('enabled:'), false, '不再有会留下悬空指向的 enabled 开关')
 
 // --- 21. 插件卸载时摘掉自己的注册 -------------------------------------------
 installFetchStub()
@@ -755,6 +760,148 @@ await runWaterfall(ctx, { provider: 'opencode-go', sessionId: 'session-cred', mo
 assertEq(lastHeaders().get('authorization'), 'Bearer key-a', '从 credentials 服务解析多 key')
 ctx.dispose()
 
+// --- 28. 容量/准入 429：按服务端提示等待后重试 ------------------------------
+// 提示值（after 3 s）在测试里被 maxDelayMs 夹到毫秒级，避免真实等待。
+const FAST_RETRY = { initialDelayMs: 1, maxDelayMs: 2, jitterRatio: 0 }
+const ADMISSION_REPLY = () => ({
+  status: 429,
+  json: {
+    type: 'server_error',
+    message:
+      'Upstream request failed: [ttft_admission_refused] the cell is at capacity; retry shortly (after 3 s)',
+  },
+})
+/** 在 llm/stream 作用域里发一次请求并返回 Response（便于断言状态码与正文）。 */
+async function fetchInWaterfall(ctx, options, url, init) {
+  let captured
+  const handler = ctx.listeners.get('llm/stream')
+  const wrapped = handler(options, async function* generate() {
+    captured = await fetch(url, init ?? { method: 'POST', body: '{}' })
+    yield 'x'
+  })
+  for await (const _chunk of wrapped) void _chunk
+  return captured
+}
+
+// admission 429 → 200：两次请求，会话头与请求体不变，最终成功。
+installFetchStub()
+calls.length = 0
+let admissionHits = 0
+reply = () => (admissionHits++ === 0 ? ADMISSION_REPLY() : { ok: true })
+replyStatus = 200
+ctx = makeCtx()
+apply(ctx, { retry: FAST_RETRY })
+const recovered = await fetchInWaterfall(
+  ctx,
+  { provider: 'opencode-go', sessionId: 'session-retry', model: 'm' },
+  CHAT_URL,
+)
+assertEq(calls.length, 2, '准入 429 后重试一次')
+assertEq(recovered.status, 200, '重试后拿到 200')
+assertEq(
+  new Headers(calls[0].init.headers).get('x-opencode-session'),
+  'session-retry',
+  '第一次请求带会话头',
+)
+assertEq(
+  new Headers(calls[1].init.headers).get('x-opencode-session'),
+  'session-retry',
+  '重试沿用同一个会话 id',
+)
+assertEq(JSON.stringify(lastBody()), '{}', '重试重放了同一个请求体')
+ctx.dispose()
+
+// 持续准入 429：最多尝试 maxAttempts 次，最终把原始 429 原样交回上层（正文可读）。
+installFetchStub()
+calls.length = 0
+reply = ADMISSION_REPLY
+ctx = makeCtx()
+apply(ctx, { retry: { ...FAST_RETRY, maxAttempts: 3 } })
+const exhausted = await fetchInWaterfall(
+  ctx,
+  { provider: 'opencode-go', sessionId: 'session-retry-limit', model: 'm' },
+  CHAT_URL,
+)
+assertEq(calls.length, 3, '重试次数受 maxAttempts 限制')
+assertEq(exhausted.status, 429, '最终仍返回 429')
+assertTrue((await exhausted.text()).includes('ttft_admission_refused'), '返回的 429 正文未被消费')
+ctx.dispose()
+
+// 准入 429 不计入 key 失败：不换 key、不告警。
+installFetchStub()
+calls.length = 0
+reply = ADMISSION_REPLY
+ctx = makeCtx()
+apply(ctx, { ...KEY_CONFIG, retry: FAST_RETRY })
+await fetchInWaterfall(ctx, { provider: 'opencode-go', sessionId: 'session-admission-key', model: 'm' }, CHAT_URL)
+await fetchInWaterfall(ctx, { provider: 'opencode-go', sessionId: 'session-admission-key', model: 'm' }, CHAT_URL)
+assertEq(lastHeaders().get('authorization'), 'Bearer oc_sk_test_key', '准入 429 不换 key')
+assertEq(ctx.logs.warn.some((line) => line.includes('连续失败')), false, '准入 429 不触发换 key 告警')
+ctx.dispose()
+
+// 配额 429 照旧：不重试，并参与 key 失败计数。
+installFetchStub()
+calls.length = 0
+reply = () => ({ status: 429, json: { type: 'GoUsageLimitError', message: 'Go usage limit exceeded' } })
+ctx = makeCtx()
+apply(ctx, { ...KEY_CONFIG, retry: FAST_RETRY })
+const quota = await fetchInWaterfall(
+  ctx,
+  { provider: 'opencode-go', sessionId: 'session-quota', model: 'm' },
+  CHAT_URL,
+)
+assertEq(calls.length, 1, '配额 429 不重试')
+assertEq(quota.status, 429, '配额 429 原样返回')
+await fetchInWaterfall(ctx, { provider: 'opencode-go', sessionId: 'session-quota', model: 'm' }, CHAT_URL)
+reply = () => ({ ok: true })
+replyStatus = 200
+await fetchInWaterfall(ctx, { provider: 'opencode-go', sessionId: 'session-quota', model: 'm' }, CHAT_URL)
+assertEq(lastHeaders().get('authorization'), 'Bearer oc_sk_test_key_2', '配额 429 仍按旧规则换 key')
+ctx.dispose()
+
+// 等待期间取消：立即结束，不发起第二次请求。
+installFetchStub()
+calls.length = 0
+reply = ADMISSION_REPLY
+ctx = makeCtx()
+apply(ctx, { retry: { initialDelayMs: 500, maxDelayMs: 500, minDelayMs: 500, jitterRatio: 0 } })
+const controller = new AbortController()
+setTimeout(() => controller.abort(), 10)
+const abortedRetry = await catchError(() =>
+  fetch(CHAT_URL, { method: 'POST', body: '{}', signal: controller.signal }),
+)
+assertEq(abortedRetry?.name, 'AbortError', '等待中取消抛 AbortError')
+assertEq(calls.length, 1, '取消后不再重试')
+ctx.dispose()
+
+// 不可重放的流式请求：不重试，原样返回。
+installFetchStub()
+calls.length = 0
+reply = ADMISSION_REPLY
+ctx = makeCtx()
+apply(ctx, { retry: FAST_RETRY })
+const streamBody = new ReadableStream({
+  start(streamController) {
+    streamController.enqueue(new TextEncoder().encode('{}'))
+    streamController.close()
+  },
+})
+const streamed = await fetch(CHAT_URL, { method: 'POST', body: streamBody, duplex: 'half' })
+assertEq(calls.length, 1, '不可重放的流式请求不重试')
+assertEq(streamed.status, 429, '流式请求原样返回 429')
+ctx.dispose()
+
+// 关掉重试时保持单次请求。
+installFetchStub()
+calls.length = 0
+reply = ADMISSION_REPLY
+ctx = makeCtx()
+apply(ctx, { retry: { ...FAST_RETRY, enabled: false } })
+const disabled = await fetch(CHAT_URL, { method: 'POST', body: '{}' })
+assertEq(calls.length, 1, 'retry.enabled: false 时不重试')
+assertEq(disabled.status, 429, '关闭重试后原样返回 429')
+ctx.dispose()
+
 // 配置归一化。
 assertEq(
   normalizeConfig({ keys: ['a', { ref: 'b', priority: 2 }] }).keys.map((entry) => entry.ref).join(','),
@@ -762,16 +909,22 @@ assertEq(
   'normalizeConfig 归一化 keys',
 )
 assertEq(normalizeConfig({}).keyFailoverAfter, 2, '默认失败阈值是 2')
+assertEq(normalizeConfig({}).retry.enabled, true, 'retry 默认开启')
+assertEq(normalizeConfig({ retry: { maxAttempts: 3 } }).retry.maxAttempts, 3, 'normalizeConfig 采纳 retry 配置')
+assertEq(normalizeConfig({ retry: { maxAttempts: 'x' } }).retry.maxAttempts, 2, '非法 retry 值回落到默认')
 
-// --- 28. Config（插件页表单）与 volatile 访问器 -----------------------------
+// --- 29. Config（插件页表单）与 volatile 访问器 -----------------------------
 assertEq(Config === undefined || typeof Config === 'object', true, 'Config 要么是 schema，要么缺失但不影响加载')
 const accessor = (value) => ({ get: () => value })
 const fromForm = normalizeConfig({
   search: { model: accessor('auto'), modelFallback: accessor(false), fallbackModels: accessor(['m-a']) },
+  retry: { enabled: accessor(false), maxAttempts: accessor(4), honorServerHint: accessor(false) },
 })
 assertEq(fromForm.search.model, 'auto', '表单写入的访问器被还原成普通值')
 assertEq(fromForm.search.modelFallback, false, '布尔访问器同样还原')
 assertEq(fromForm.search.fallbackModels.join(','), 'm-a', '数组访问器同样还原')
+assertEq(fromForm.retry.enabled, false, 'retry 布尔访问器同样还原')
+assertEq(fromForm.retry.maxAttempts, 4, 'retry 数字访问器同样还原')
 assertEq(normalizeConfig({ search: { model: 'x' } }).search.modelFallback, true, '未配置时回退开关保持默认')
 
 console.log(`\n${stats.pass} passed, ${stats.fail} failed`)

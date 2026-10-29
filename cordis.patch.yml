@@ -49,6 +49,13 @@
         #   - ref: OPENCODE_GO_API_KEY_2
         #     priority: 5
         # keyFailoverAfter: 2
+        # 容量/准入类 429（ttft_admission_refused 等）：按响应里的 after N s 等待后重试。
+        # 默认值见 README「429 重试」；一般不用配。配额类 429 不重试。
+        # retry:
+        #   enabled: true
+        #   maxAttempts: 2
+        #   maxDelayMs: 30000
+        #   honorServerHint: true
         search:
           provider: opencode-go
           baseURL: https://opencode.ai/zen/go/v1
